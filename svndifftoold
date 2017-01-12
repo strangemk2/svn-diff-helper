@@ -1,0 +1,179 @@
+#!/usr/bin/env perl
+
+use 5.018;
+use File::Basename;
+use File::Path qw(make_path remove_tree);
+use Cwd;
+use File::Copy;
+use Getopt::Std;
+
+use Data::Dumper;
+
+my $rc = 'svndifftooldrc';
+my @default_rc = ("/etc/$rc", "$ENV{HOME}/$rc", "./$rc");
+my %default_conf = (
+	diff_cmd => 'meld',
+	diff_cmd_args => '',
+	svn => 'svn',
+	svn_args => '',
+	tmp_dir => $ENV{TMP},
+);
+
+my $conf = \%default_conf;
+for my $rc_file (@default_rc)
+{
+	if (-f $rc_file)
+	{
+		read_conf($conf, $rc_file);
+	}
+}
+
+sub read_conf
+{
+	my ($conf, $rc_file) = @_;
+	open (my $fh, '<', $rc_file) or die "Open $rc_file error.";
+	for my $line (<$fh>)
+	{
+		chomp($line);
+		next if ($line =~ m/^#/);
+		if ($line =~ m/^(\w+)\s*=\s*(.+)$/)
+		{
+			$conf->{$1} = $2;
+		}
+	}
+}
+
+sub get_repo_url
+{
+	my $cmd = 'svn info';
+	my $res = `$cmd`;
+	open (my $fh, '<', \$res);
+	for my $line (<$fh>)
+	{
+		# use substitute instead of chomp to compatible with any file types.
+		$line =~ s/\r?\n?$//;
+
+		if ($line =~ m/^URL: (.*)$/)
+		{
+			return $1;
+		}
+	}
+	'';
+}
+
+sub to_slash
+{
+	my $s = shift;
+	$s =~ s/\\/\//g;
+	return $s;
+}
+
+sub export_svn
+{
+	my ($svn_url, $svn_revision, $svn_file_list, $dist_path) = @_;
+	for my $svn_file (@$svn_file_list)
+	{
+		my $f = to_slash($svn_file);
+		my $url = "$svn_url/$f\@$svn_revision";
+		my $d = "$dist_path/$f";
+		my $dirname = dirname($d);
+		my $basename = basename($d);
+
+		make_path($dirname) unless (-d $dirname);
+		my $cmd = "$conf->{svn} export $url $dirname >/dev/null 2>&1";
+		system($cmd);
+	}
+}
+
+sub export_local
+{
+	my ($current_path, $svn_file_list, $dist_path) = @_;
+	for my $svn_file (@$svn_file_list)
+	{
+		my $f = to_slash($svn_file);
+		my $url = "$current_path/$f";
+		my $d = "$dist_path/$f";
+		my $dirname = dirname($d);
+		my $basename = basename($d);
+
+		make_path($dirname) unless (-d $dirname);
+		#my $cmd = "cp $url $dirname >/dev/null 2>&1";
+		#system($cmd);
+		copy($url, $dirname);
+	}
+}
+
+sub get_svn_summarize_list
+{
+	my ($left, $right) = @_;
+	my @ret;
+	my $cmd = "$conf->{svn} diff --summarize -r $left:$right 2>/dev/null";
+	open(my $fh, '-|', $cmd);
+	for my $line (<$fh>)
+	{
+		$line =~ s/\r?\n?$//;
+		if ($line =~ m/^[MAD]\s/)
+		{
+			$line =~ s/.*\s+//;
+			push @ret, $line;
+		}
+	}
+	return \@ret;
+}
+
+sub get_svn_diff_list
+{
+	my ($left) = @_;
+	my @ret;
+	my $cmd = "$conf->{svn} diff -r $left 2>/dev/null | grep Index: ";
+	open(my $fh, '-|', $cmd);
+	for my $line (<$fh>)
+	{
+		$line =~ s/\r?\n?$//;
+		if ($line =~ m/^Index: /)
+		{
+			$line =~ s/^Index: //;
+			push @ret, $line;
+		}
+	}
+	return \@ret;
+}
+
+sub parse_args
+{
+	my %opts;
+	getopt('r', \%opts);
+	if (!defined($opts{r}))
+	{
+		return 'HEAD';
+	}
+	else
+	{
+		my ($left, $right) = split /:/, $opts{r};
+		return ($left, $right);
+	}
+}
+
+my ($left_rev, $right_rev) = parse_args();
+if (defined($left_rev))
+{
+	my $left = "$conf->{tmp_dir}/left";
+	my $right = "$conf->{tmp_dir}/right";
+	my $repo_url = get_repo_url();
+	if (defined($right_rev))
+	{
+		my $file_list = get_svn_summarize_list($left_rev, $right_rev);
+		export_svn($repo_url, $left_rev, $file_list, $left);
+		export_svn($repo_url, $right_rev, $file_list, $right);
+	}
+	else
+	{
+		my $file_list = get_svn_diff_list($left_rev);
+		export_svn($repo_url, $left_rev, $file_list, $left);
+		export_local(getcwd(), $file_list, $right);
+	}
+	my $cmd = "$conf->{diff_cmd} $left $right";
+	system($cmd);
+	remove_tree($left);
+	remove_tree($right);
+}
