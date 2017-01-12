@@ -1,0 +1,41 @@
+#!/usr/bin/env perl
+
+use 5.018;
+
+my $rc = 'svndiffrc';
+my @default_rc = ("/etc/$rc", "$ENV{HOME}/$rc", "./$rc");
+my %default_conf = (
+	pager => 'less',
+	pager_args => '-r +Gg',
+	color => 'colordiff.pl',
+	color_args => '',
+	svn => 'svn',
+	svn_args => '--git',
+);
+
+my $conf = \%default_conf;
+for my $rc_file (@default_rc)
+{
+	if (-f $rc_file)
+	{
+		read_conf($conf, $rc_file);
+	}
+}
+
+sub read_conf
+{
+	my ($conf, $rc_file) = @_;
+	open (my $fh, '<', $rc_file) or die "Open $rc_file error.";
+	for my $line (<$fh>)
+	{
+		chomp($line);
+		next if ($line =~ m/^#/);
+		if ($line =~ m/^(\w+)\s*=\s*(.+)$/)
+		{
+			$conf->{$1} = $2;
+		}
+	}
+}
+
+my $cmd = "$conf->{svn} diff $conf->{svn_args} @ARGV | $conf->{color} $conf->{color_args} | $conf->{pager} $conf->{pager_args}";
+system($cmd);
